@@ -1,4 +1,4 @@
-/**
+/** This program operates a linear actuator to move a solar tracker based on time of day
  * 
  * 
  */
@@ -7,7 +7,6 @@
 #include <RTClib.h>
 #include <SoftwareSerial.h>
 #include "enum_types.h"
-
 
 // START wake reason and system status declarations
 // keep a list of reasons why the device wakes up so we know what to do
@@ -96,11 +95,11 @@ const unsigned int MINIMUM_ACTUATOR_MOVEMENT = 4;
 // what is the full west position
 const unsigned int FULL_WEST_POSITION = 910;
 // what is our start and end time of day (24 hour time)?
-const unsigned int EAST_START_HOUR = 10;
-const unsigned int EAST_START_MINUTE = 30;
+const unsigned int EAST_START_HOUR = 11;
+const unsigned int EAST_START_MINUTE = 7;
 const unsigned int EAST_START_MINUTES = convertTimeToNumberOfMinutes(EAST_START_HOUR, EAST_START_MINUTE);
-const unsigned int WEST_END_HOUR = 19; // don't forget 24 hour time
-const unsigned int WEST_END_MINUTE = 0;
+const unsigned int WEST_END_HOUR = 15; // don't forget 24 hour time
+const unsigned int WEST_END_MINUTE = 54;
 const unsigned int WEST_END_MINUTES = convertTimeToNumberOfMinutes(WEST_END_HOUR, WEST_END_MINUTE);
 const unsigned int TOTAL_DAY_MINUTES = WEST_END_MINUTES - EAST_START_MINUTES;
 static_assert( WEST_END_HOUR > EAST_START_HOUR, "the west end time must be later than the east start time (the sun moves from east to west you know)");
@@ -562,6 +561,8 @@ void awaitSetupButtons() {
         while (!isStatusButtonPressed() && millis() - lastInteraction < 5000);
         // if the button is still pressed then start tracking
         if (isStatusButtonPressed()) {
+          // wait until button is released
+          while (isStatusButtonPressed());
           // set system status to tracking
           currentSystemStatus = TRACKING;
           // if pressMeansSetZero is set, then set position to zero
@@ -572,12 +573,12 @@ void awaitSetupButtons() {
             delay(3000);
             showTimePosMessage("Danger! Tracking");
           } else {
-            // else the position is already set, we do nothing so position stays where it was at
+            // else the position is already set so button press means to just enable
             showTimePosMessage("Tracking enabled");
-            // no need to alert user to movement, it's already where it needs to be for the current time
+            // alert user to watch out, the system will soon move to current location for the time
+            delay(3000);
+            showTimePosMessage("Danger! Tracking");
           }
-          // wait until button is released
-          while (isStatusButtonPressed());
         } else {
           // user did not confirm in time allotted, alert them tracking is aborted
           showTimePosMessage("Tracking aborted");
