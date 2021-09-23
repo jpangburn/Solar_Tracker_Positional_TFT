@@ -128,6 +128,15 @@ void stopMoving() {
   digitalWrite(MOVE_EAST_PIN, LOW);
   digitalWrite(MOVE_WEST_PIN, LOW);
 }
+void disableTracking() {
+  // to set the right status we need to know if we have a known actuator position or not
+  if (actuatorPosition == ACTUATOR_POSITION_UNKNOWN){
+    currentSystemStatus = NEEDS_SETUP;
+  } else {
+    // actuator position is known, so just set status to disabled so user can re-enable
+    currentSystemStatus = TRACKING_DISABLED;
+  }
+}
 // actuator sensor pin averaging
 const float ALPHA = 0.1; // lower number means changing values take longer to take effect (spikes must last longer to be counted)
 float accumulator = 0; // keeps a running "average" of the sensor value
@@ -333,7 +342,7 @@ void moveToRelativePercentage(float relativePercentage) {
         // check the status button so the user can halt movement
         if (isStatusButtonPressed()){
           // disable tracking
-          currentSystemStatus = TRACKING_DISABLED;
+          disableTracking();
           // break out of the while loop
           break;
         }
@@ -449,7 +458,7 @@ void awaitSetupButtons() {
       // update tracking mode since user has manually moved
       // if status is TRACKING then set to TRACKING_DISABLED, otherwise leave it as it is
       if (isTracking()){
-        currentSystemStatus = TRACKING_DISABLED;
+        disableTracking();
       }
       // what's our desired move direction? 
       MoveDirection moveDirection = isWestButtonPressed() ? WEST : EAST;
@@ -529,8 +538,8 @@ void awaitSetupButtons() {
     } else if (isStatusButtonPressed()){
       // if we're already tracking, then this aborts
       if (isTracking()){
-        // set TRACKING_DISABLED instead of NEEDS_SETUP because we know position and it hasn't changed, so tracking can resume without setup
-        currentSystemStatus = TRACKING_DISABLED; 
+        // disable tracking
+        disableTracking();
         showTimePosMessage("Tracking disabled");
         // wait until button is released
         while (isStatusButtonPressed());
