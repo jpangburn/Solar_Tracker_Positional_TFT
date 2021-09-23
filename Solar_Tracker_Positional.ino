@@ -88,6 +88,9 @@ void turnOffDisplay() {
 // END external serial display declarataions
 
 // START actuator declarations
+// is a limit switch installed at the east limit? It should be installed as close to 5 ticks from the east limit as possible
+// check full west position after east limit switch installation to modify FULL_WEST_POSITION if needed
+const bool EAST_LIMIT_SWITCH_INSTALLED = false;
 // use an impossible position for unknown actuator position
 const int ACTUATOR_POSITION_UNKNOWN = -10000;
 // what is the minimum amount of ticks to move?  (don't move if going to move less than this)
@@ -112,6 +115,7 @@ int actuatorPosition = ACTUATOR_POSITION_UNKNOWN;
 const int MOVE_EAST_PIN = 6;
 const int MOVE_WEST_PIN = 5;
 const int ACTUATOR_COUNTER_PIN = 13;
+const int EAST_LIMIT_SWITCH_PIN = 255; // change to a real pin if/when installed
 void moveEast() {
   // make sure west movement pin is off
   digitalWrite(MOVE_WEST_PIN, LOW);
@@ -136,6 +140,10 @@ void disableTracking() {
     // actuator position is known, so just set status to disabled so user can re-enable
     currentSystemStatus = TRACKING_DISABLED;
   }
+}
+bool isEastLimitSwitchActivated() {
+  // the switch is normally closed, so it goes high when pressed
+  return digitalRead(EAST_LIMIT_SWITCH_PIN);
 }
 // actuator sensor pin averaging
 const float ALPHA = 0.1; // lower number means changing values take longer to take effect (spikes must last longer to be counted)
@@ -551,7 +559,11 @@ void awaitSetupButtons() {
         // tell user to press it again to track
         bool pressMeansSetZero;
         if (actuatorPosition == ACTUATOR_POSITION_UNKNOWN || actuatorPosition < 0){
-          showTimePosMessage("Press to zero");
+          if (!EAST_LIMIT_SWITCH_INSTALLED){
+            showTimePosMessage("Press to zero");
+          } else {
+            showTimePosMessage("Press to a-zero");
+          }
           pressMeansSetZero = true;
         } else {
           showTimePosMessage("Press to enable");
@@ -562,7 +574,14 @@ void awaitSetupButtons() {
         while (!isStatusButtonPressed() && millis() - lastInteraction < 5000);
         // if user was given the option to enable, but didn't take it, give them the option to zero
         if (!isStatusButtonPressed() && !pressMeansSetZero){
-          showTimePosMessage("Press to zero");
+          if (!EAST_LIMIT_SWITCH_INSTALLED){
+            showTimePosMessage("Press to zero");
+          } else {
+            showTimePosMessage("Press to a-zero");
+          }
+          // sleep for a bit in case user was just pressing button
+          // so they don't accidentally zero when they wanted to enable
+          delay(1000);
           pressMeansSetZero = true;
           lastInteraction = millis();
         }
@@ -572,25 +591,97 @@ void awaitSetupButtons() {
         if (isStatusButtonPressed()) {
           // wait until button is released
           while (isStatusButtonPressed());
-          // set system status to tracking
-          currentSystemStatus = TRACKING;
           // if pressMeansSetZero is set, then set position to zero
           if (pressMeansSetZero){
-            actuatorPosition = 0;
-            showTimePosMessage("Position zeroed");
-            // alert user to watch out, the system will soon move to current location for the time
-            delay(3000);
-            showTimePosMessage("Danger! Tracking");
+            if (!EAST_LIMIT_SWITCH_INSTALLED){
+              // no east limit switch, so user is manually setting zero point
+              actuatorPosition = 0;
+              showTimePosMessage("Position zeroed");
+              // alert user to watch out, the system will soon move to current location for the time
+              delay(3000);
+              showTimePosMessage("Danger! Tracking");
+              // system is ready to track, enable it
+              currentSystemStatus = TRACKING;
+            } else {
+              // east limit switch exists, use it to auto zero
+              // if the limit switch is already activated then error- we need to make sure it can show a change
+              // because the not activated state means the switch is a closed circuit (letting us know the wires at
+              // least are not broken/cut)
+              if (isEastLimitSwitchActivated()){
+                // error, leave tracking disabled
+                // tell user
+                showTimePosMessage("Auto zero error");
+                delay(3000);
+                showTimePosMessage("Already at limit");
+              } else {
+                // limit switch is not activated, move east until we find it
+                bool autoZeroAborted = false;
+                showTimePosMessage("Auto zeroing");
+                // read actuator sensor pin for a bit to get starting value
+                setStartingStatus();
+                // turn on the motor to move east
+                moveEast();
+                while (!isEastLimitSwitchActivated() && !autoZeroAborted){
+                  if (isAnyButtonPressed()) {
+                    // any button halts and aborts auto zero
+                    autoZeroAborted = true;
+                  }
+                  // watch the status pin for 20 ms, and tell it what direction we're moving so it updates actuatorPosition correctly
+                  // it will leave actuatorPosition alone if it's unknown
+                  watchStatusPin(20, EAST);
+                }
+                // stop the motor
+                stopMoving();
+                // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
+                watchStatusPin(300, EAST);
+                // was it aborted?
+                if (autoZeroAborted){
+                  showTimePosMessage("Auto zero abort");
+                  // leave tracking disabled
+                } else {
+                  // not aborted, so we're sitting at the limit switch, move west a few ticks then call it zero
+                  // no need to get starting status because we just finished watching, start motor west with temporary zero here
+                  actuatorPosition = 0;
+                  // start motor to move west
+                  moveWest();
+                  while (actuatorPosition < 5){
+                    // watch the status pin for 20 ms, and tell it what direction we're moving so it updates actuatorPosition correctly
+                    // it will leave actuatorPosition alone if it's unknown
+                    watchStatusPin(20, WEST);
+                    // don't bother with any aborts because it's a small movement and we've just come through here so the tracker is safe to move
+                  }
+                  // stop the motor
+                  stopMoving();
+                  // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
+                  watchStatusPin(300, EAST);
+                  // this is our new zero
+                  actuatorPosition = 0;
+                  showTimePosMessage("Position zeroed");
+                  // system is ready to track, enable it
+                  currentSystemStatus = TRACKING;
+                  // alert user to watch out, the system will soon move to current location for the time
+                  delay(3000);
+                  showTimePosMessage("Danger! Tracking");
+                }
+                // in some cases the user might still be holding a button down (cancelling auto zero), wait for all buttons to be released
+                while(isAnyButtonPressed());
+                // update lastInteraction time so the loop waits
+                lastInteraction = millis();
+              }
+            }
           } else {
             // else the position is already set so button press means to just enable
             showTimePosMessage("Tracking enabled");
             // alert user to watch out, the system will soon move to current location for the time
             delay(3000);
             showTimePosMessage("Danger! Tracking");
+            // system is ready to track, enable it
+            currentSystemStatus = TRACKING;
           }
         } else {
           // user did not confirm in time allotted, alert them tracking is aborted
           showTimePosMessage("Tracking aborted");
+          // leave tracking disabled
         }
       }
       // update lastInteraction time so the loop waits
@@ -622,6 +713,7 @@ void setup() {
   digitalWrite(MOVE_WEST_PIN, LOW);
   pinMode(MOVE_WEST_PIN, OUTPUT);
   pinMode(ACTUATOR_COUNTER_PIN, INPUT_PULLUP);
+  pinMode(EAST_LIMIT_SWITCH_PIN, INPUT_PULLUP);
   // END actuator setup
 
   // START external display setup
