@@ -87,6 +87,32 @@ void turnOffDisplay() {
 }
 // END external serial display declarataions
 
+// START Control button declarations
+// status button
+const int STATUS_BUTTON_PIN = 18;  // input pin (for a pushbutton switch)
+// east and west buttons
+const int EAST_BUTTON_PIN = 11;
+const int WEST_BUTTON_PIN = 12;
+// when you push the status button, this ISR fires.  It sets wake reason so loop() code knows what woke it up.
+void onStatusButtonISR() {
+  currentWakeReason = STATUS_UPDATE;
+}
+// buttons are pressed if they return a 1, so invert the logic to return true/false
+bool isStatusButtonPressed() {
+  return !digitalRead(STATUS_BUTTON_PIN);
+}
+
+bool isEastButtonPressed() {
+  return !digitalRead(EAST_BUTTON_PIN);
+}
+bool isWestButtonPressed() {
+  return !digitalRead(WEST_BUTTON_PIN);
+}
+bool isAnyButtonPressed() {
+  return isStatusButtonPressed() || isEastButtonPressed() || isWestButtonPressed();
+}
+// END Control button declarations
+
 // START actuator declarations
 // is a limit switch installed at the east limit? It should be installed as close to 5 ticks from the east limit as possible
 // check full west position after east limit switch installation to modify FULL_WEST_POSITION if needed
@@ -188,6 +214,61 @@ void watchStatusPin(const int ticks, const MoveDirection movementDirection){
     delay(1);
   }
 }
+// helper move function that moves until a condition is met, or until an abort condition is met
+// if aborted or error, tracking will be disabled
+// returns true if aborted or error, false if move completed normally
+template <class Callable1, class Callable2>
+bool moveUntilConditionOrAbort(const MoveDirection moveDirection, Callable1 moveUntilConditionFunction, Callable2 abortFunction){
+  // remember if we aborted or not
+  bool aborted = false;
+  // read actuator sensor pin for a bit to get starting value
+  setStartingStatus();
+  // watch the motor based on time to make sure it's moving
+  unsigned long lastCheckMillis = millis();
+  int lastCheckActuatorPosition = actuatorPosition;
+  // turn on the motor
+  if (moveDirection == WEST){
+    moveWest();
+  } else {
+    moveEast();
+  }
+  // wait until we get to our destination
+  while( !moveUntilConditionFunction() ){
+    // watch the status pin for 20 ms, and tell it what direction we're moving so it updates actuatorPosition correctly
+    watchStatusPin(20, moveDirection);
+    // check the abort condition so the user can halt movement (or other abort condition)
+    if (abortFunction()){
+      aborted = true;
+      // disable tracking
+      disableTracking();
+      // break out of the while loop
+      break;
+    }
+    // if the motor has moved since the last time we checked, update the lastCheckMillis
+    // but only do this if the motor position is known when we started
+    if (actuatorPosition != ACTUATOR_POSITION_UNKNOWN){
+      if (lastCheckActuatorPosition != actuatorPosition){
+        // motor has moved
+        lastCheckActuatorPosition = actuatorPosition;
+        lastCheckMillis = millis();
+      } else if (millis() - lastCheckMillis > 750) {
+        // motor hasn't moved for 3/4 of a second, way too long!  Set motor sensing error (a fatal error) and break out of the while loop
+        currentSystemStatus = MOTOR_SENSING_ERROR;
+        // assume we've lost actuator position
+        actuatorPosition = ACTUATOR_POSITION_UNKNOWN;
+        // this also should result in the abort flag being returned
+        aborted = true;
+        break;
+      }
+    }
+  }
+  // stop the motor
+  stopMoving();
+  // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
+  watchStatusPin(300, moveDirection);
+  // return the aborted status
+  return aborted;
+}
 // END actuator declarations
 
 // START RTC declarations
@@ -204,32 +285,6 @@ void onRTCAlarmISR() {
   alarmCounter += 1;
 }
 // END RTC declarations
-
-// START Control button declarations
-// status button
-const int STATUS_BUTTON_PIN = 18;  // input pin (for a pushbutton switch)
-// east and west buttons
-const int EAST_BUTTON_PIN = 11;
-const int WEST_BUTTON_PIN = 12;
-// when you push the status button, this ISR fires.  It sets wake reason so loop() code knows what woke it up.
-void onStatusButtonISR() {
-  currentWakeReason = STATUS_UPDATE;
-}
-// buttons are pressed if they return a 1, so invert the logic to return true/false
-bool isStatusButtonPressed() {
-  return !digitalRead(STATUS_BUTTON_PIN);
-}
-
-bool isEastButtonPressed() {
-  return !digitalRead(EAST_BUTTON_PIN);
-}
-bool isWestButtonPressed() {
-  return !digitalRead(WEST_BUTTON_PIN);
-}
-bool isAnyButtonPressed() {
-  return isStatusButtonPressed() || isEastButtonPressed() || isWestButtonPressed();
-}
-// END Control button declarations
 
 // Show the time, position, tracker status, and whatever message is sent by caller
 // DO NOT CALL this when motor is moving.  It can take a long time if screen is off so you'll miss motor ticks
@@ -332,45 +387,12 @@ void moveToRelativePercentage(float relativePercentage) {
       if (screenAlreadyOn){
         showTimePosMessage(moveString);
       }
-      // read actuator sensor pin for a bit to get starting value
-      setStartingStatus();
-      // watch the motor based on time to make sure it's moving
-      unsigned long lastCheckMillis = millis();
-      int lastCheckActuatorPosition = actuatorPosition;
-      // turn on the motor
-      if (moveDirection == WEST){
-        moveWest();
-      } else {
-        moveEast();
-      }
-      // wait until we get to our destination
-      while( (moveDirection == WEST && actuatorPosition < desiredPosition) || (moveDirection == EAST && actuatorPosition > desiredPosition) ){
-        // watch the status pin for 20 ms, and tell it what direction we're moving so it updates actuatorPosition correctly
-        watchStatusPin(20, moveDirection);
-        // check the status button so the user can halt movement
-        if (isStatusButtonPressed()){
-          // disable tracking
-          disableTracking();
-          // break out of the while loop
-          break;
-        }
-        // if the motor has moved since the last time we checked, update the lastCheckMillis
-        if (lastCheckActuatorPosition != actuatorPosition){
-          // motor has moved
-          lastCheckActuatorPosition = actuatorPosition;
-          lastCheckMillis = millis();
-        } else if (millis() - lastCheckMillis > 750) {
-          // motor hasn't moved for 3/4 of a second, way too long!  Set motor sensing error (a fatal error) and break out of the while loop
-          currentSystemStatus = MOTOR_SENSING_ERROR;
-          // assume we've lost actuator position
-          actuatorPosition = ACTUATOR_POSITION_UNKNOWN;
-          break;
-        }
-      }
-      // stop the motor
-      stopMoving();
-      // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
-      watchStatusPin(300, moveDirection);
+
+      // move in the move direction until we get to our desiredPosition, or the user hits any button
+      moveUntilConditionOrAbort(moveDirection, [=](){
+        return (moveDirection == WEST && actuatorPosition >= desiredPosition) || (moveDirection == EAST && actuatorPosition <= desiredPosition);
+      }, isAnyButtonPressed);
+      
       // if tracking is disabled, user aborted in the middle of tracking or there was an error.  We've stopped the motor and kept track of position, notify user what they did
       if (!isTracking()){
         // if this was user initiated (status is tracking disabled then notify them)
@@ -380,7 +402,7 @@ void moveToRelativePercentage(float relativePercentage) {
           // give them a few seconds to read it
           delay(2000);
           // wait for them to release the button (which may still be held, this lets them keep the message up longer if they want)
-          while(isStatusButtonPressed());
+          while(isAnyButtonPressed());
         } else if (screenAlreadyOn) {
           // it must have been a fatal error and the screen is on, so notify the user (fatal error takes over message)
           showTimePosMessage("");
@@ -473,71 +495,35 @@ void awaitSetupButtons() {
       const char* moveString = moveDirection == WEST ? "Manual move west" : "Manual move east";
       Serial.println(moveString);
       showTimePosMessage(moveString);
-      // read actuator sensor pin for a bit to get starting value
-      setStartingStatus();
-      // watch the motor based on time to make sure it's moving
-      unsigned long lastCheckMillis = millis();
-      int lastCheckActuatorPosition = actuatorPosition;
-      // turn on the motor
-      if (moveDirection == WEST){
-        moveWest();
-      } else {
-        moveEast();
-      }
-      // wait until user lets go of the button
-      bool autoMove = false;
-      while( (moveDirection == WEST && isWestButtonPressed()) || (moveDirection == EAST && isEastButtonPressed()) ||
-              (autoMove && moveDirection == WEST && actuatorPosition < (int)FULL_WEST_POSITION) ||
-              (autoMove && moveDirection == EAST && actuatorPosition > 0) ){
-        // if autoMove is false, then we keep watching for user to let go of the direction button above.  But if user presses status button while
-        // still holding a move button then we switch to autoMove and keep moving until the end of the movement direction
-        // do not allow automove if actuator position is unknown
-        if (!autoMove && isStatusButtonPressed() && actuatorPosition != ACTUATOR_POSITION_UNKNOWN){
-          // engage autoMove
-          autoMove = true;
-          // stop the motor so we can have time to update the screen to tell the user automove is on
-          stopMoving();
-          // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
-          watchStatusPin(300, moveDirection);
+      // move east or west until corresponding button is released, abort if user simultaneously presses status button (wants to abort to switch to auto move)
+      bool aborted = moveUntilConditionOrAbort(moveDirection, [=](){
+        return (moveDirection == WEST && !isWestButtonPressed()) || (moveDirection == EAST && !isEastButtonPressed());
+      }, isStatusButtonPressed);
+      // did they abort by pushing status button?
+      if (aborted && isStatusButtonPressed()){
+        // yes, aborted by pushing status button because they want auto move
+        // auto move is only allowed if actuator position is known
+        if (actuatorPosition != ACTUATOR_POSITION_UNKNOWN){
+          // auto move is ok
           // notify user of auto move
-          showTimePosMessage("auto move ON");
+          showTimePosMessage("Auto move ON");
           // wait for them to release the buttons
           while(isAnyButtonPressed());
-          // update the motor movement variables since user could have held the button for a while, don't want that to falsely indicate sensor failure
-          lastCheckActuatorPosition = actuatorPosition;
-          lastCheckMillis = millis();
-          // restart motor
-          if (moveDirection == WEST){
-            moveWest();
-          } else {
-            moveEast();
-          }
-        } else if (autoMove && isAnyButtonPressed()) {
-          // any button halts, though if they hold down the same direction button it will be manually moving that way
-          autoMove = false;
-          // with no buttons pressed now the while loop will exit
+          // auto move in the same direction until we reach the end position, or user presses any button to abort
+          moveUntilConditionOrAbort(moveDirection, [=](){
+            return (moveDirection == WEST && actuatorPosition >= (int)FULL_WEST_POSITION) ||
+                    (moveDirection == EAST && actuatorPosition <= 0);
+          }, isAnyButtonPressed);
+          // we don't really care if they aborted or not, either way we've stopped moving and no need to do more
+        } else {
+          // auto move is not ok because actuator position is unknown
+          showTimePosMessage("Can't auto move");
+          // make sure they can see this
+          delay(3000);
         }
-        // if the motor has moved since the last time we checked, update the lastCheckMillis
-        if (lastCheckActuatorPosition != actuatorPosition){
-          // motor has moved
-          lastCheckActuatorPosition = actuatorPosition;
-          lastCheckMillis = millis();
-        } else if (millis() - lastCheckMillis > 750) {
-          // motor hasn't moved for 3/4 of a second, way too long!  Set motor sensing error (a fatal error) and break out of the while loop
-          currentSystemStatus = MOTOR_SENSING_ERROR;
-          // assume we've lost actuator position
-          actuatorPosition = ACTUATOR_POSITION_UNKNOWN;
-          break;
-        }
-        // watch the status pin for 20 ms, and tell it what direction we're moving so it updates actuatorPosition correctly
-        // it will leave actuatorPosition alone if it's unknown
-        watchStatusPin(20, moveDirection);
       }
-      // stop the motor
-      stopMoving();
-      // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
-      watchStatusPin(300, moveDirection);
-      // notify user of new position
+      // however we got to this point, we should just tell the user that we've stopped moving
+      // and if there was an error then this will tell them that
       showTimePosMessage("stopped moving");
       // in some cases the user might still be holding a button down (cancelling auto move), wait for all buttons to be released
       while(isAnyButtonPressed());
@@ -615,27 +601,9 @@ void awaitSetupButtons() {
                 showTimePosMessage("Already at limit");
               } else {
                 // limit switch is not activated, move east until we find it
-                bool autoZeroAborted = false;
                 showTimePosMessage("Auto zeroing");
-                // read actuator sensor pin for a bit to get starting value
-                setStartingStatus();
-                // turn on the motor to move east
-                moveEast();
-                while (!isEastLimitSwitchActivated() && !autoZeroAborted){
-                  if (isAnyButtonPressed()) {
-                    // any button halts and aborts auto zero
-                    autoZeroAborted = true;
-                  }
-                  // watch the status pin for 20 ms, and tell it what direction we're moving so it updates actuatorPosition correctly
-                  // it will leave actuatorPosition alone if it's unknown
-                  watchStatusPin(20, EAST);
-                }
-                // stop the motor
-                stopMoving();
-                // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
-                watchStatusPin(300, EAST);
-                // was it aborted?
-                if (autoZeroAborted){
+                // auto move east until we hit the limit switch, or user presses any button to abort
+                if (moveUntilConditionOrAbort(EAST, isEastLimitSwitchActivated, isAnyButtonPressed)){
                   showTimePosMessage("Auto zero abort");
                   // leave tracking disabled
                 } else {
@@ -643,25 +611,22 @@ void awaitSetupButtons() {
                   // no need to get starting status because we just finished watching, start motor west with temporary zero here
                   actuatorPosition = 0;
                   // start motor to move west
-                  moveWest();
-                  while (actuatorPosition < 5){
-                    // watch the status pin for 20 ms, and tell it what direction we're moving so it updates actuatorPosition correctly
-                    // it will leave actuatorPosition alone if it's unknown
-                    watchStatusPin(20, WEST);
-                    // don't bother with any aborts because it's a small movement and we've just come through here so the tracker is safe to move
+                  if (moveUntilConditionOrAbort(WEST, [=](){
+                        return actuatorPosition >= 5;
+                      }, isAnyButtonPressed)){
+                        showTimePosMessage("Auto zero abort");
+                        // leave tracking disabled
+                  } else {
+                    // auto zero process completed
+                    // this is our new zero
+                    actuatorPosition = 0;
+                    showTimePosMessage("Position zeroed");
+                    // system is ready to track, enable it
+                    currentSystemStatus = TRACKING;
+                    // alert user to watch out, the system will soon move to current location for the time
+                    delay(3000);
+                    showTimePosMessage("Danger! Tracking");
                   }
-                  // stop the motor
-                  stopMoving();
-                  // watch the status pin for a while while motor is stopping (motor stops quickly, so this is probably overly cautious)
-                  watchStatusPin(300, EAST);
-                  // this is our new zero
-                  actuatorPosition = 0;
-                  showTimePosMessage("Position zeroed");
-                  // system is ready to track, enable it
-                  currentSystemStatus = TRACKING;
-                  // alert user to watch out, the system will soon move to current location for the time
-                  delay(3000);
-                  showTimePosMessage("Danger! Tracking");
                 }
                 // in some cases the user might still be holding a button down (cancelling auto zero), wait for all buttons to be released
                 while(isAnyButtonPressed());
