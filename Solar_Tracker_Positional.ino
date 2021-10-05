@@ -496,11 +496,11 @@ void awaitSetupButtons() {
       Serial.println(moveString);
       showTimePosMessage(moveString);
       // move east or west until corresponding button is released, abort if user simultaneously presses status button (wants to abort to switch to auto move)
-      bool aborted = moveUntilConditionOrAbort(moveDirection, [=](){
+      bool abortedWithStatusButton = moveUntilConditionOrAbort(moveDirection, [=](){
         return (moveDirection == WEST && !isWestButtonPressed()) || (moveDirection == EAST && !isEastButtonPressed());
       }, isStatusButtonPressed);
       // did they abort by pushing status button?
-      if (aborted && isStatusButtonPressed()){
+      if (abortedWithStatusButton){
         // yes, aborted by pushing status button because they want auto move
         // auto move is only allowed if actuator position is known
         if (actuatorPosition != ACTUATOR_POSITION_UNKNOWN){
@@ -585,9 +585,9 @@ void awaitSetupButtons() {
               showTimePosMessage("Position zeroed");
               // alert user to watch out, the system will soon move to current location for the time
               delay(3000);
-              showTimePosMessage("Danger! Tracking");
               // system is ready to track, enable it
               currentSystemStatus = TRACKING;
+              showTimePosMessage("Danger! Tracking");
             } else {
               // east limit switch exists, use it to auto zero
               // if the limit switch is already activated then error- we need to make sure it can show a change
@@ -636,12 +636,12 @@ void awaitSetupButtons() {
             }
           } else {
             // else the position is already set so button press means to just enable
+            // system is ready to track, enable it
+            currentSystemStatus = TRACKING;
             showTimePosMessage("Tracking enabled");
             // alert user to watch out, the system will soon move to current location for the time
             delay(3000);
             showTimePosMessage("Danger! Tracking");
-            // system is ready to track, enable it
-            currentSystemStatus = TRACKING;
           }
         } else {
           // user did not confirm in time allotted, alert them tracking is aborted
