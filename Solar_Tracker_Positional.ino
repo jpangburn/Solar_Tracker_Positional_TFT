@@ -6,6 +6,7 @@
 #include <avr/sleep.h>
 #include <RTClib.h>
 #include <SoftwareSerial.h>
+#include <math.h>
 #include "enum_types.h"
 
 // START wake reason and system status declarations
@@ -122,14 +123,18 @@ const int ACTUATOR_POSITION_UNKNOWN = -10000;
 // what is the minimum amount of ticks to move?  (don't move if going to move less than this)
 const unsigned int MINIMUM_ACTUATOR_MOVEMENT = 4;
 // what is the full west position
-const unsigned int FULL_WEST_POSITION = 910;
-// what is our start and end time of day (24 hour time)?
-const unsigned int EAST_START_HOUR = 11;
-const unsigned int EAST_START_MINUTE = 7;
-const unsigned int EAST_START_MINUTES = convertTimeToNumberOfMinutes(EAST_START_HOUR, EAST_START_MINUTE);
+const unsigned int FULL_WEST_POSITION = 2300;
+// what is our start and end time of day (24 hour time), and what day of the year did we record this?
+// To do this: adjust the start/end time using the equation of time for the day when the positions where configured
+// then adjust the current time to compensate for the current day of the year's result from the
+// equation of time.
+const unsigned int DAY_OF_YEAR_WHEN_STARTEND_SET = 300; // Oct 27 is 300
+const unsigned int EAST_START_HOUR = 10;
+const unsigned int EAST_START_MINUTE = 30;
+const unsigned int EAST_START_MINUTES = convertTimeToNumberOfMinutes(EAST_START_HOUR, EAST_START_MINUTE, DAY_OF_YEAR_WHEN_STARTEND_SET);
 const unsigned int WEST_END_HOUR = 15; // don't forget 24 hour time
 const unsigned int WEST_END_MINUTE = 54;
-const unsigned int WEST_END_MINUTES = convertTimeToNumberOfMinutes(WEST_END_HOUR, WEST_END_MINUTE);
+const unsigned int WEST_END_MINUTES = convertTimeToNumberOfMinutes(WEST_END_HOUR, WEST_END_MINUTE, DAY_OF_YEAR_WHEN_STARTEND_SET);
 const unsigned int TOTAL_DAY_MINUTES = WEST_END_MINUTES - EAST_START_MINUTES;
 static_assert( WEST_END_HOUR > EAST_START_HOUR, "the west end time must be later than the east start time (the sun moves from east to west you know)");
 // what time of day do we do our move back to the east?  (MUST be later than the WEST_END_HOUR)
@@ -433,8 +438,24 @@ void moveToRelativePercentage(float relativePercentage) {
 }
 
 // we need to do computations in proportion to hours and minutes, so make them into a number
-unsigned int convertTimeToNumberOfMinutes(unsigned int hour, unsigned int minute) {
-  return hour * 60 + minute;
+// and we also need to take the day of the year into account so we can use the equation of time
+// to correct the clock time to relative solar time
+unsigned int convertTimeToNumberOfMinutes(unsigned int hour, unsigned int minute, double dayOfYear) {
+  // compute the equationOfTime offset for the dayOfYear
+  double B = 360 * (dayOfYear - 81) / 365;
+  // the cmath sin/cos functions expect radians, so convert B to radians
+  B = M_PI*B/180;
+  double equationOfTimeOffset = 9.87 * sin(2*B) - 7.53 * cos(B) - 1.5 * sin(B);
+  // now take the given hours and minutes, convert them to total minutes, and add in the offset
+  // rounded to an integer
+  return hour * 60 + minute + (int)round(equationOfTimeOffset);
+}
+
+unsigned int getDayOfYear(unsigned int month, unsigned int day){
+  // compute day of year from month/day (ignore leap year because being off by a day is unimportant)
+  int daysToMonth[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+  // subtract one from the month to index the array
+  return daysToMonth[month - 1] + day;
 }
 
 // this looks at the current time and makes movements if it's within the daylight hours that we track, and tracking is enabled
@@ -444,10 +465,15 @@ void moveToCorrectPositionForCurrentTime() {
     Serial.println(F("tracking enabled"));
     // get the current time
     DateTime now = rtc.now();
-    // convert to number of minutes relative to the EAST start
-    int relativeMinutes = convertTimeToNumberOfMinutes(now.hour(), now.minute()) - EAST_START_MINUTES;
+    // convert to number of minutes relative to the EAST start, using day of year
+    int relativeMinutes = convertTimeToNumberOfMinutes(now.hour(), now.minute(), getDayOfYear(now.month(), now.day())) - EAST_START_MINUTES;
     // find what percent we are of the total minutes (can be negative or greater than 1 if outside the movement time)
     float relativePercentage = ((float)relativeMinutes) / TOTAL_DAY_MINUTES;
+    // allow tracker to move fully to end by sending 100% for values within 20 minutes of TOTAL_DAY_MINUTES
+    if (0 <= relativeMinutes - (int)TOTAL_DAY_MINUTES && relativeMinutes - (int)TOTAL_DAY_MINUTES <= 20){
+      // it's either at the total day minutes, or less than 20 over, so use 100%
+      relativePercentage = 1;
+    }
     /* debug code for computing how much to move
     Serial.print(F("EAST_START_MINUTES, TOTAL_DAY_MINUTES, relativeMinutes, relativePercentage: "));
     Serial.print(EAST_START_MINUTES);

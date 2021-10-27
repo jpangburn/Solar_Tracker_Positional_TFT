@@ -1,6 +1,6 @@
 # Solar_Tracker_Positional
 
-This is an Arduino program which uses a linear actuator with a reed switch to make a single axis solar tracker move with no visual reference to the sun.  Since the sun is in the same spot east/west every day at the same time, it's easy to track based on time of day.
+This is an Arduino program which uses a linear actuator with a reed switch to make a single axis solar tracker move with no visual reference to the sun.  Since the sun is in approximately the same spot east/west every day at the same time (adjusted using the equation of time), it's easy to track based on time of day.
 
 Read the User notes from the following section to understand how the controller is supposed to function.
 
