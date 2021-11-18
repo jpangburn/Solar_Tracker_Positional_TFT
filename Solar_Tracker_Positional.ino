@@ -7,7 +7,10 @@
 #include <RTClib.h>
 #include <SoftwareSerial.h>
 #include <math.h>
+#include <SolarPosition.h>
 #include "enum_types.h"
+// this include pulls settings specific to a given installation: FULL_WEST_POSITION, EAST_ANGLE, WEST_ANGLE, LATITUDE, LONGITUDE
+#include "install_specific_settings.h"
 
 // START wake reason and system status declarations
 // keep a list of reasons why the device wakes up so we know what to do
@@ -115,38 +118,18 @@ bool isAnyButtonPressed() {
 // END Control button declarations
 
 // START actuator declarations
-// is a limit switch installed at the east limit? It should be installed as close to 5 ticks from the east limit as possible
-// check full west position after east limit switch installation to modify FULL_WEST_POSITION if needed
-const bool EAST_LIMIT_SWITCH_INSTALLED = false;
 // use an impossible position for unknown actuator position
 const int ACTUATOR_POSITION_UNKNOWN = -10000;
 // what is the minimum amount of ticks to move?  (don't move if going to move less than this)
 const unsigned int MINIMUM_ACTUATOR_MOVEMENT = 4;
-// what is the full west position
-const unsigned int FULL_WEST_POSITION = 2300;
-// what is our start and end time of day (24 hour time), and what day of the year did we record this?
-// To do this: adjust the start/end time using the equation of time for the day when the positions where configured
-// then adjust the current time to compensate for the current day of the year's result from the
-// equation of time.
-const unsigned int DAY_OF_YEAR_WHEN_STARTEND_SET = 300; // Oct 27 is 300
-const unsigned int EAST_START_HOUR = 10;
-const unsigned int EAST_START_MINUTE = 30;
-const unsigned int EAST_START_MINUTES = convertTimeToNumberOfMinutes(EAST_START_HOUR, EAST_START_MINUTE, DAY_OF_YEAR_WHEN_STARTEND_SET);
-const unsigned int WEST_END_HOUR = 15; // don't forget 24 hour time
-const unsigned int WEST_END_MINUTE = 54;
-const unsigned int WEST_END_MINUTES = convertTimeToNumberOfMinutes(WEST_END_HOUR, WEST_END_MINUTE, DAY_OF_YEAR_WHEN_STARTEND_SET);
-const unsigned int TOTAL_DAY_MINUTES = WEST_END_MINUTES - EAST_START_MINUTES;
-static_assert( WEST_END_HOUR > EAST_START_HOUR, "the west end time must be later than the east start time (the sun moves from east to west you know)");
-// what time of day do we do our move back to the east?  (MUST be later than the WEST_END_HOUR)
-const unsigned int EAST_RETURN_HOUR = 20;
-const unsigned int EAST_RETURN_MINUTE = 0;
-static_assert( (EAST_RETURN_HOUR > WEST_END_HOUR) || (EAST_RETURN_HOUR == WEST_END_HOUR && EAST_RETURN_MINUTE > WEST_END_MINUTE), "east return time must be after west end time" );
 // keep track of the actuator position
 int actuatorPosition = ACTUATOR_POSITION_UNKNOWN;
+// compute the total degrees the actuator can move from install_specific_settings.h
+const float TOTAL_DEGREES_CAN_MOVE = WEST_ANGLE - EAST_ANGLE;
+// define the pins involved
 const int MOVE_EAST_PIN = 6;
 const int MOVE_WEST_PIN = 5;
 const int ACTUATOR_COUNTER_PIN = 13;
-const int EAST_LIMIT_SWITCH_PIN = 255; // change to a real pin if/when installed
 void moveEast() {
   // make sure west movement pin is off
   digitalWrite(MOVE_WEST_PIN, LOW);
@@ -171,10 +154,6 @@ void disableTracking() {
     // actuator position is known, so just set status to disabled so user can re-enable
     currentSystemStatus = TRACKING_DISABLED;
   }
-}
-bool isEastLimitSwitchActivated() {
-  // the switch is normally closed, so it goes high when pressed
-  return digitalRead(EAST_LIMIT_SWITCH_PIN);
 }
 // actuator sensor pin averaging
 const float ALPHA = 0.1; // lower number means changing values take longer to take effect (spikes must last longer to be counted)
@@ -363,9 +342,9 @@ void sleepAtLoopEnd() {
 void moveToRelativePercentage(float relativePercentage) {
   // verify the percentage is within 0 and 1 so we don't exceed limits
   if (relativePercentage < 0) {
-    Serial.println(F("WARNING: received instruction to move to a negative percentage, ignoring"));
+    Serial.println(F("INFO: received instruction to move to a negative percentage, ignoring"));
   } else if (relativePercentage > 1) {
-    Serial.println(F("WARNING: received instruction to move to a percentage over 100%, ignoring"));
+    Serial.println(F("INFO: received instruction to move to a percentage over 100%, ignoring"));
   } else if (!isTracking()) {
     Serial.println(F("WARNING: received instruction to move to a percentage but tracking is not enabled, ignoring"));
   } else {
@@ -437,58 +416,31 @@ void moveToRelativePercentage(float relativePercentage) {
   }
 }
 
-// we need to do computations in proportion to hours and minutes, so make them into a number
-// and we also need to take the day of the year into account so we can use the equation of time
-// to correct the clock time to relative solar time
-unsigned int convertTimeToNumberOfMinutes(unsigned int hour, unsigned int minute, double dayOfYear) {
-  // compute the equationOfTime offset for the dayOfYear
-  double B = 360 * (dayOfYear - 81) / 365;
-  // the cmath sin/cos functions expect radians, so convert B to radians
-  B = M_PI*B/180;
-  double equationOfTimeOffset = 9.87 * sin(2*B) - 7.53 * cos(B) - 1.5 * sin(B);
-  // now take the given hours and minutes, convert them to total minutes, and add in the offset
-  // rounded to an integer
-  return hour * 60 + minute + (int)round(equationOfTimeOffset);
-}
-
-unsigned int getDayOfYear(unsigned int month, unsigned int day){
-  // compute day of year from month/day (ignore leap year because being off by a day is unimportant)
-  int daysToMonth[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
-  // subtract one from the month to index the array
-  return daysToMonth[month - 1] + day;
-}
-
-// this looks at the current time and makes movements if it's within the daylight hours that we track, and tracking is enabled
+// this looks at the current solar position, and moves as necessary depending on if tracking is enabled or not
+SolarPosition* solarLocation;
 void moveToCorrectPositionForCurrentTime() {
   Serial.println(F("In moveToCorrectPositionForCurrentTime"));
   if (isTracking()){
     Serial.println(F("tracking enabled"));
-    // get the current time
-    DateTime now = rtc.now();
-    // convert to number of minutes relative to the EAST start, using day of year
-    int relativeMinutes = convertTimeToNumberOfMinutes(now.hour(), now.minute(), getDayOfYear(now.month(), now.day())) - EAST_START_MINUTES;
-    // find what percent we are of the total minutes (can be negative or greater than 1 if outside the movement time)
-    float relativePercentage = ((float)relativeMinutes) / TOTAL_DAY_MINUTES;
-    // allow tracker to move fully to end by sending 100% for values within 20 minutes of TOTAL_DAY_MINUTES
-    if (0 <= relativeMinutes - (int)TOTAL_DAY_MINUTES && relativeMinutes - (int)TOTAL_DAY_MINUTES <= 20){
-      // it's either at the total day minutes, or less than 20 over, so use 100%
-      relativePercentage = 1;
-    }
-    /* debug code for computing how much to move
-    Serial.print(F("EAST_START_MINUTES, TOTAL_DAY_MINUTES, relativeMinutes, relativePercentage: "));
-    Serial.print(EAST_START_MINUTES);
-    Serial.print(F(", "));
-    Serial.print(TOTAL_DAY_MINUTES);
-    Serial.print(F(", "));
-    Serial.print(relativeMinutes);
-    Serial.print(F(", "));
-    Serial.println(relativePercentage);*/
-    if (relativePercentage < 0) {
-      Serial.println(F("Too early to start tracking"));
-    } else if (relativePercentage > 1) {
-      Serial.println(F("It's after hours, kicking back"));
+    // get the current solar position
+    SolarPosition_t currentSolarPosition = solarLocation->getSolarPosition();
+    // if the sun is below the horizon then we should be at the farthest east we can go
+    // (so when the sun goes down at the end of the day, you move ASAP while battery is up)
+    if (currentSolarPosition.elevation < 0){
+      moveToRelativePercentage(0.0);
     } else {
-      // it's a valid percentage, we should move
+      // the sun is up, so figure out where it is between our east/west limit angles
+      float degreesOffEast = currentSolarPosition.azimuth - EAST_ANGLE;
+      // calculate that as a percentage of the total degrees the tracker can move
+      float relativePercentage = degreesOffEast / TOTAL_DEGREES_CAN_MOVE;
+
+      // clamp values from 0-1 (0 to 100%)
+      if (relativePercentage < 0){
+        relativePercentage = 0;
+      } else if (relativePercentage > 1){
+        relativePercentage = 1;
+      }
+      // request movement to this position (going to the same position over and over is ok, it just won't do anything when it sees there's no movement to make)
       moveToRelativePercentage(relativePercentage);
     }
   } else {
@@ -571,11 +523,7 @@ void awaitSetupButtons() {
         // tell user to press it again to track
         bool pressMeansSetZero;
         if (actuatorPosition == ACTUATOR_POSITION_UNKNOWN || actuatorPosition < 0){
-          if (!EAST_LIMIT_SWITCH_INSTALLED){
-            showTimePosMessage("Press to zero");
-          } else {
-            showTimePosMessage("Press to a-zero");
-          }
+          showTimePosMessage("Press to zero");
           pressMeansSetZero = true;
         } else {
           showTimePosMessage("Press to enable");
@@ -586,11 +534,7 @@ void awaitSetupButtons() {
         while (!isStatusButtonPressed() && millis() - lastInteraction < 5000);
         // if user was given the option to enable, but didn't take it, give them the option to zero
         if (!isStatusButtonPressed() && !pressMeansSetZero){
-          if (!EAST_LIMIT_SWITCH_INSTALLED){
-            showTimePosMessage("Press to zero");
-          } else {
-            showTimePosMessage("Press to a-zero");
-          }
+          showTimePosMessage("Press to zero");
           // sleep for a bit in case user was just pressing button
           // so they don't accidentally zero when they wanted to enable
           delay(1000);
@@ -605,61 +549,14 @@ void awaitSetupButtons() {
           while (isStatusButtonPressed());
           // if pressMeansSetZero is set, then set position to zero
           if (pressMeansSetZero){
-            if (!EAST_LIMIT_SWITCH_INSTALLED){
-              // no east limit switch, so user is manually setting zero point
-              actuatorPosition = 0;
-              showTimePosMessage("Position zeroed");
-              // alert user to watch out, the system will soon move to current location for the time
-              delay(3000);
-              // system is ready to track, enable it
-              currentSystemStatus = TRACKING;
-              showTimePosMessage("Danger! Tracking");
-            } else {
-              // east limit switch exists, use it to auto zero
-              // if the limit switch is already activated then error- we need to make sure it can show a change
-              // because the not activated state means the switch is a closed circuit (letting us know the wires at
-              // least are not broken/cut)
-              if (isEastLimitSwitchActivated()){
-                // error, leave tracking disabled
-                // tell user
-                showTimePosMessage("Auto zero error");
-                delay(3000);
-                showTimePosMessage("Already at limit");
-              } else {
-                // limit switch is not activated, move east until we find it
-                showTimePosMessage("Auto zeroing");
-                // auto move east until we hit the limit switch, or user presses any button to abort
-                if (moveUntilConditionOrAbort(EAST, isEastLimitSwitchActivated, isAnyButtonPressed)){
-                  showTimePosMessage("Auto zero abort");
-                  // leave tracking disabled
-                } else {
-                  // not aborted, so we're sitting at the limit switch, move west a few ticks then call it zero
-                  // no need to get starting status because we just finished watching, start motor west with temporary zero here
-                  actuatorPosition = 0;
-                  // start motor to move west
-                  if (moveUntilConditionOrAbort(WEST, [=](){
-                        return actuatorPosition >= 5;
-                      }, isAnyButtonPressed)){
-                        showTimePosMessage("Auto zero abort");
-                        // leave tracking disabled
-                  } else {
-                    // auto zero process completed
-                    // this is our new zero
-                    actuatorPosition = 0;
-                    showTimePosMessage("Position zeroed");
-                    // system is ready to track, enable it
-                    currentSystemStatus = TRACKING;
-                    // alert user to watch out, the system will soon move to current location for the time
-                    delay(3000);
-                    showTimePosMessage("Danger! Tracking");
-                  }
-                }
-                // in some cases the user might still be holding a button down (cancelling auto zero), wait for all buttons to be released
-                while(isAnyButtonPressed());
-                // update lastInteraction time so the loop waits
-                lastInteraction = millis();
-              }
-            }
+            // user is manually setting zero point
+            actuatorPosition = 0;
+            showTimePosMessage("Position zeroed");
+            // alert user to watch out, the system will soon move to current location for the time
+            delay(3000);
+            // system is ready to track, enable it
+            currentSystemStatus = TRACKING;
+            showTimePosMessage("Danger! Tracking");
           } else {
             // else the position is already set so button press means to just enable
             // system is ready to track, enable it
@@ -686,6 +583,12 @@ void awaitSetupButtons() {
   moveToCorrectPositionForCurrentTime();
 }
 
+// the SolarTime library needs UTC unixtime seconds for its calculations
+time_t getUTCSeconds() {
+  return rtc.now().unixtime();
+}
+
+// setup the arduino
 void setup() {
   // setup communication with IDE
   Serial.begin(57600);
@@ -704,7 +607,6 @@ void setup() {
   digitalWrite(MOVE_WEST_PIN, LOW);
   pinMode(MOVE_WEST_PIN, OUTPUT);
   pinMode(ACTUATOR_COUNTER_PIN, INPUT_PULLUP);
-  pinMode(EAST_LIMIT_SWITCH_PIN, INPUT_PULLUP);
   // END actuator setup
 
   // START external display setup
@@ -740,7 +642,18 @@ void setup() {
     // Then comment the line out again and upload again.
     // You do NOT want this line executing at the tracker
     // when it's reset and the RTC has lost power or the clock will be set wrong
-    //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // WARNING: You must also set the timezone offset here so it computes UTC time correctly when it compiles
+    // because the DATE and TIME macros are local time.
+    /*
+    #define TZ_OFFSET -8 // Pacific Standard Time (Pacific Daylight Time is -7)
+    DateTime localDateTime = DateTime(F(__DATE__), F(__TIME__));
+    time_t localSeconds = localDateTime.unixtime();
+    // convert local seconds to UTC seconds and date time
+    time_t utcSeconds = localSeconds - TZ_OFFSET * SECS_PER_HOUR;
+    DateTime utcDateTime = DateTime(utcSeconds);
+    // set the RTC with utcDateTime
+    rtc.adjust(utcDateTime);
+    a*/    
   }
 
   //we don't need the RTC's 32K Pin, so disable it
@@ -749,10 +662,12 @@ void setup() {
   // set RTC interrupt pin as INPUT_PULLUP
   pinMode(CLOCK_INTERRUPT_PIN, INPUT_PULLUP);
 
-  // set alarm 1, 2 flag to false (so alarm 1, 2 didn't happen so far)
+  // set alarm 1 flag to false (so alarm 1 didn't happen so far)
+  // disable alarm2 because it's not used
   // if not done, this easily leads to problems, as both register aren't reset on reboot/recompile
   rtc.clearAlarm(1);
   rtc.clearAlarm(2);
+  rtc.disableAlarm(2);
 
   // stop oscillating signals at SQW Pin
   // otherwise setAlarm1 will fail
@@ -768,17 +683,15 @@ void setup() {
     Serial.println(F("Alarm1 will happen in 10 seconds!"));
   }
 
-  // schedule alarm2 to go every night to move back east
-  if (!rtc.setAlarm2(
-        DateTime(2021, 9, 11, EAST_RETURN_HOUR, EAST_RETURN_MINUTE, 0), // date doesn't matter, just hours/minutes/seconds
-        DS3231_A2_Hour  // this mode triggers the alarm when the hour/minutes/seconds match. See Doxygen for other options
-        )) {
-    Serial.println(F("Error, alarm2 wasn't set!"));
-  } else {
-    Serial.println(F("Alarm2 will happen once per day to move east"));
-  }
   Serial.flush();
   // END RTC setup
+
+  // START SolarPosition setup
+  // initialize a SolarPosition class instance (which seems more like a "solar location") with lat/long for the tracker's actual location
+  solarLocation = new SolarPosition(LATITUDE, LONGITUDE);
+  // tell it where to get time from (the RTC initialized above)
+  solarLocation->setTimeProvider(getUTCSeconds);
+  // END SolarPosition setup
 
   // START Control button setup
   pinMode(STATUS_BUTTON_PIN, INPUT_PULLUP);
@@ -823,13 +736,6 @@ void loop() {
         alarmCounter = 0;
         // move to the position specified by the current time (it will not move if tracking is disabled)
         moveToCorrectPositionForCurrentTime();
-      }
-      // if alarm 2 fired, then it's time to do our nightly east move
-      if (rtc.alarmFired(2)) {
-        rtc.clearAlarm(2);
-        Serial.println(F("Alarm2 cleared, moving east for the night"));
-        // east is at 0% of the movement range
-        moveToRelativePercentage(0);
       }
 
       break;
