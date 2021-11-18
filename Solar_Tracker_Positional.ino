@@ -653,7 +653,7 @@ void setup() {
     DateTime utcDateTime = DateTime(utcSeconds);
     // set the RTC with utcDateTime
     rtc.adjust(utcDateTime);
-    a*/    
+    */    
   }
 
   //we don't need the RTC's 32K Pin, so disable it
