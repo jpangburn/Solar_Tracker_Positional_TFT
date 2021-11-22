@@ -9,7 +9,9 @@
 #include <math.h>
 #include <SolarPosition.h>
 #include "enum_types.h"
-// this include pulls settings specific to a given installation: FULL_WEST_POSITION, EAST_ANGLE, WEST_ANGLE, LATITUDE, LONGITUDE
+// this include pulls settings specific to a given installation:
+// FULL_WEST_POSITION, LATITUDE, LONGITUDE, X0-X3 for polynomial regression calculation
+// and MINIMUM_ACTUATOR_MOVEMENT
 #include "install_specific_settings.h"
 
 // START wake reason and system status declarations
@@ -120,12 +122,8 @@ bool isAnyButtonPressed() {
 // START actuator declarations
 // use an impossible position for unknown actuator position
 const int ACTUATOR_POSITION_UNKNOWN = -10000;
-// what is the minimum amount of ticks to move?  (don't move if going to move less than this)
-const unsigned int MINIMUM_ACTUATOR_MOVEMENT = 4;
 // keep track of the actuator position
 int actuatorPosition = ACTUATOR_POSITION_UNKNOWN;
-// compute the total degrees the actuator can move from install_specific_settings.h
-const float TOTAL_DEGREES_CAN_MOVE = WEST_ANGLE - EAST_ANGLE;
 // define the pins involved
 const int MOVE_EAST_PIN = 6;
 const int MOVE_WEST_PIN = 5;
@@ -253,6 +251,12 @@ bool moveUntilConditionOrAbort(const MoveDirection moveDirection, Callable1 move
   // return the aborted status
   return aborted;
 }
+
+// calculate position from desired azimuth
+float calculatePositionFromAzimuth(float azimuth){
+  float position = X3 * pow(azimuth, 3.0) + X2 * pow(azimuth, 2.0) + X1*azimuth + X0;
+  return position;
+}
 // END actuator declarations
 
 // START RTC declarations
@@ -338,19 +342,17 @@ void sleepAtLoopEnd() {
   digitalWrite(LED_BUILTIN, HIGH);
 }
 
-// the time based movement can call this to send movement instructions, or the nightly alarm to move east calls it too
-void moveToRelativePercentage(float relativePercentage) {
+// the time based movement can call this to send movement instructions
+void moveToDesiredPosition(int desiredPosition) {
   // verify the percentage is within 0 and 1 so we don't exceed limits
-  if (relativePercentage < 0) {
-    Serial.println(F("INFO: received instruction to move to a negative percentage, ignoring"));
-  } else if (relativePercentage > 1) {
-    Serial.println(F("INFO: received instruction to move to a percentage over 100%, ignoring"));
+  if (desiredPosition < 0) {
+    Serial.println(F("INFO: received instruction to move to a negative position, ignoring"));
+  } else if (desiredPosition > FULL_WEST_POSITION) {
+    Serial.println(F("INFO: received instruction to move to position beyond the full west position, ignoring"));
   } else if (!isTracking()) {
-    Serial.println(F("WARNING: received instruction to move to a percentage but tracking is not enabled, ignoring"));
+    Serial.println(F("WARNING: received instruction to move to a position but tracking is not enabled, ignoring"));
   } else {
-    // it's a valid percentage, we should move
-    // what's our desired position?
-    int desiredPosition = FULL_WEST_POSITION * relativePercentage;
+    // it's a valid position, we should move
     // only move if the requested move is greater than the minimum
     if ((unsigned int)abs(desiredPosition - actuatorPosition) > MINIMUM_ACTUATOR_MOVEMENT){
       // big enough move requested, do it
@@ -427,21 +429,19 @@ void moveToCorrectPositionForCurrentTime() {
     // if the sun is below the horizon then we should be at the farthest east we can go
     // (so when the sun goes down at the end of the day, you move ASAP while battery is up)
     if (currentSolarPosition.elevation < 0){
-      moveToRelativePercentage(0.0);
+      moveToDesiredPosition(0);
     } else {
-      // the sun is up, so figure out where it is between our east/west limit angles
-      float degreesOffEast = currentSolarPosition.azimuth - EAST_ANGLE;
-      // calculate that as a percentage of the total degrees the tracker can move
-      float relativePercentage = degreesOffEast / TOTAL_DEGREES_CAN_MOVE;
+      // the sun is up, so use the polynomial regression to calculate the desired position given the azimuth
+      int desiredPosition = (int)calculatePositionFromAzimuth(currentSolarPosition.azimuth);
 
-      // clamp values from 0-1 (0 to 100%)
-      if (relativePercentage < 0){
-        relativePercentage = 0;
-      } else if (relativePercentage > 1){
-        relativePercentage = 1;
+      // clamp values from 0 - FULL_WEST_POSITION
+      if (desiredPosition < 0){
+        desiredPosition = 0;
+      } else if (desiredPosition > FULL_WEST_POSITION){
+        desiredPosition = FULL_WEST_POSITION;
       }
       // request movement to this position (going to the same position over and over is ok, it just won't do anything when it sees there's no movement to make)
-      moveToRelativePercentage(relativePercentage);
+      moveToDesiredPosition(desiredPosition);
     }
   } else {
     // tracking is not enabled, so we should not move based on time
