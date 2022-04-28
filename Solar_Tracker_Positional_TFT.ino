@@ -3,9 +3,9 @@
  * 
  */
 
-#include <avr/sleep.h>
+//TODO: sleep doesn't work on the Due, maybe need to replace with another MEGA 2560
+//#include <avr/sleep.h>
 #include <RTClib.h>
-#include <SoftwareSerial.h>
 #include <math.h>
 #include <SolarPosition.h>
 #include "enum_types.h"
@@ -13,6 +13,11 @@
 // FULL_WEST_POSITION, LATITUDE, LONGITUDE, X0-X3 for polynomial regression calculation
 // and MINIMUM_ACTUATOR_MOVEMENT
 #include "install_specific_settings.h"
+
+// display/touch screen imports
+#include <Adafruit_GFX.h>
+#include <MCUFRIEND_kbv.h>
+#include <TouchScreen.h>
 
 // START wake reason and system status declarations
 // keep a list of reasons why the device wakes up so we know what to do
@@ -34,8 +39,8 @@ enum SystemStatus { NEEDS_SETUP,
                     RTC_LOST_POWER, // this status actually requires the device to be reprogrammed to set the correct time again
                     LAST_STATUS // never use this status, it's just for compile checks.  It should always be actually last in the list.
                   };
-// maintain this array with values that can be displayed as a status in a 16 character LCD display (do not put an entry for LAST)
-const char* systemStatusStrings[] = { "Setup Required", "Tracking", "TrackingDisabled", "Motor Sense Err", "RTC Lost Power"};
+// maintain this array with values that can be displayed as a status in a 26 character TFT display (do not put an entry for LAST)
+const char* systemStatusStrings[] = { "Setup Required", "Tracking ON", "Tracking Disabled", "Motor Sensing Error", "RTC Lost Power"};
 // make sure our systemStatusStrings list size matches our enum size except for LAST.  This is a compile time check.
 static_assert(sizeof(systemStatusStrings)/sizeof(systemStatusStrings[0]) == LAST_STATUS, "bad systemStatusStrings array size");
 // keep track of the current system status
@@ -50,23 +55,97 @@ bool isFatalError() {
 // END wake reason and system status declarations
 
 // START external serial display declarations
-// We don't receive, use an invalid pin for RX_PIN
-const int RX_PIN = 255;
-const int TX_PIN = 43;
-const int SERIAL_POWER_PIN = 42;
-// the display uses invert logic
-const int INVERTED = 1;
+MCUFRIEND_kbv tft;
+#define MINPRESSURE 100
+#define MAXPRESSURE 800
+
+// ALL Touch panels and wiring are DIFFERENT
+// copy-paste results from TouchScreen_Calibr_native.ino
+// though for me that program didn't work on my Due
+//const int XP = 6, XM = A2, YP = A1, YM = 7; //ID=0x9341
+//const int TS_LEFT = 907, TS_RT = 136, TS_TOP = 942, TS_BOT = 139;
+const int XP=8,XM=A2,YP=A3,YM=9; //240x320 ID=0x9341
+const int TS_LEFT=118,TS_RT=931,TS_TOP=72,TS_BOT=887;
+TouchScreen ts = TouchScreen(XP, YP, XM, YM, 300);
+
+int pixel_x, pixel_y;     //Touch_getXY() updates global vars
+bool Touch_getXY(void)
+{
+  // the point pressure is unreliable- it may read 200 several times then a 0
+  // so we need to take several readings and see if more than 1 fall in the bounds
+  // because not touching gets spurious readings like 0, -1, -11000, 13000, etc
+  const int READ_COUNT = 10;
+  int hitCount = 0;
+  TSPoint p;
+  for (int i=0; i<READ_COUNT; i++){
+    p = ts.getPoint();
+    pinMode(YP, OUTPUT);      //restore shared pins
+    pinMode(XM, OUTPUT);
+    digitalWrite(YP, HIGH);   //because TFT control pins
+    digitalWrite(XM, HIGH);
+    //Serial.print("p.z: ");
+    //Serial.println(p.z);
+    if (p.z > MINPRESSURE && p.z < MAXPRESSURE){
+      hitCount++;
+    }
+  }
+
+    
+  // did we get enough hit counts?
+  if (hitCount >  2){
+    // yes, so use the last hit's x/y because x/y is reliable
+    pixel_x = map(p.y, TS_TOP, TS_BOT, 0, 320);
+    pixel_y = map(p.x, TS_RT, TS_LEFT, 0, 240);
+    // return true to indicate pressed
+    return true;
+  } else {
+    // return false to indicate no press
+    return false;
+  }
 /* 
-Set up a new serial output using the pin definitions above. Note the 
-argument "inverted," which instructs SoftwareSerial to output BPI/BPK-
-compatible inverted-TTL serial (like RS-232, but without the +/- 
-voltage swing).*/
-SoftwareSerial mySerial = SoftwareSerial(RX_PIN, TX_PIN, INVERTED);
-// these are commands to tell the screen to do something other than display a character
-const char CLEAR_SCREEN[] = { (char)(254), 1, (char)(254), (char)(128), 0 };
-const char GOTO_LINE_TWO[] = { (char)(254), (char)(192), 0 };
-// SCREEN_SIZE is the displayable area plus 1 for '\0' null terminator
-const int SCREEN_SIZE = 17;
+    TSPoint p = ts.getPoint();
+    pinMode(YP, OUTPUT);      //restore shared pins
+    pinMode(XM, OUTPUT);
+    digitalWrite(YP, HIGH);   //because TFT control pins
+    digitalWrite(XM, HIGH);
+    bool pressed = (p.z > MINPRESSURE && p.z < MAXPRESSURE);
+    Serial.print("p.z: ");
+    Serial.print(p.z);
+    Serial.print(" p.x: ");
+    Serial.print(p.x);
+    Serial.print(" p.y: ");
+    Serial.println(p.y);
+    if (pressed) {
+      // portrait mapping
+      //pixel_x = map(p.x, TS_LEFT, TS_RT, 0, tft.width()); //.kbv makes sense to me
+      //pixel_y = map(p.y, TS_TOP, TS_BOT, 0, tft.height());
+      // landscape mapping
+      pixel_x = map(p.y, TS_TOP, TS_BOT, 0, 320);
+      pixel_y = map(p.x, TS_RT, TS_LEFT, 0, 240);
+      /*
+      PORTRAIT  CALIBRATION     240 x 320
+x = map(p.x, LEFT=118, RT=931, 0, 240)
+y = map(p.y, TOP=72, BOT=887, 0, 320)
+
+LANDSCAPE CALIBRATION     320 x 240
+x = map(p.y, LEFT=72, RT=887, 0, 320)
+y = map(p.x, TOP=931, BOT=118, 0, 240)
+    }
+    return pressed;*/
+}
+
+#define BLACK   0x0000
+#define BLUE    0x001F
+#define RED     0xF800
+#define GREEN   0x07E0
+#define CYAN    0x07FF
+#define MAGENTA 0xF81F
+#define YELLOW  0xFFE0
+#define WHITE   0xFFFF
+
+Adafruit_GFX_Button east_btn, west_btn, east_auto_btn, west_auto_btn;
+const int DISPLAY_POWER_PIN = 53;
+const int SCREEN_SIZE = 40;
 // how long does it take the screen after receiving power to be ready to receive commands
 const int POWERUP_DELAY = 750;
 // keep track if the screen is already on so we know when the user is watching if we should send display updates
@@ -76,29 +155,87 @@ char line1Buffer[SCREEN_SIZE];
 char line2Buffer[SCREEN_SIZE];
 char timeBuffer[] = "hh:mm:ss";
 
+void updateTextArea(){
+  tft.fillRect(0,0,320,70, WHITE);
+  tft.setCursor(2,3);
+  tft.print(line1Buffer);
+  tft.setCursor(2,23);
+  tft.print(line2Buffer);
+}
 // call this to turn on the display and clear it (just clears if the display is already on)
 void turnOnClearDisplay(){
-  digitalWrite(SERIAL_POWER_PIN, HIGH);
+  //digitalWrite(DISPLAY_POWER_PIN, HIGH);
   if (!screenAlreadyOn) {
     // need to wait before writing stuff to the display
     delay(POWERUP_DELAY);
     screenAlreadyOn = true;
+    // initialize the screen
+    uint16_t ID = tft.readID();
+    Serial.print("TFT ID = 0x");
+    Serial.println(ID, HEX);
+    tft.begin(ID);
+    tft.setRotation(1);   //landscape
+    // initialize the buttons
+    east_btn.initButton(&tft,  70, 105, 120, 40, WHITE, CYAN, BLACK, (char *)"MOVE EAST", 2);
+    west_btn.initButton(&tft, 250, 105, 120, 40, WHITE, CYAN, BLACK, (char *)"MOVE WEST", 2);
+    east_auto_btn.initButton(&tft,  70, 180, 120, 40, WHITE, CYAN, BLACK, (char *)"AUTO EAST", 2);
+    west_auto_btn.initButton(&tft, 250, 180, 120, 40, WHITE, CYAN, BLACK, (char *)"AUTO WEST", 2);
   }
-  mySerial.print(CLEAR_SCREEN);
+  // clear the screen and draw the UI
+  tft.fillScreen(BLACK);
+  east_btn.drawButton(false);
+  west_btn.drawButton(false);
+  east_auto_btn.drawButton(false);
+  west_auto_btn.drawButton(false);
+
+  updateTextArea();
 }
 
 void turnOffDisplay() {
-  digitalWrite(SERIAL_POWER_PIN, LOW);
-  screenAlreadyOn = false;
+  //digitalWrite(DISPLAY_POWER_PIN, LOW);
+  tft.fillScreen(BLACK);
+  
+  //screenAlreadyOn = false;
 }
-// END external serial display declarataions
+
+// Array of display button addresses to behave like a list
+Adafruit_GFX_Button *buttons[] = {&east_btn, &west_btn, &east_auto_btn, &west_auto_btn, NULL};
+
+/* update the state of a button and redraw as reqd
+ *
+ * main program can use isPressed(), justPressed() etc
+ */
+bool updateButton(Adafruit_GFX_Button *b, bool down)
+{
+    b->press(down && b->contains(pixel_x, pixel_y));
+    if (b->justReleased())
+        b->drawButton(false);
+    if (b->justPressed()){
+      //Serial.println("touchscreen button just pressed");
+        b->drawButton(true);
+    }
+    if (b->isPressed()){
+      b->drawButton(true);
+    }
+    return down;
+}
+
+/* most screens have different sets of buttons
+ * life is easier if you process whole list in one go
+ */
+bool updateButtonList(Adafruit_GFX_Button **pb)
+{
+    bool down = Touch_getXY();
+    for (int i = 0 ; pb[i] != NULL; i++) {
+        updateButton(pb[i], down);
+    }
+    return down;
+}
+// END external display declarataions
 
 // START Control button declarations
 // status button
 const int STATUS_BUTTON_PIN = 18;  // input pin (for a pushbutton switch)
-// east and west buttons
-const int EAST_BUTTON_PIN = 11;
-const int WEST_BUTTON_PIN = 12;
 // when you push the status button, this ISR fires.  It sets wake reason so loop() code knows what woke it up.
 void onStatusButtonISR() {
   currentWakeReason = STATUS_UPDATE;
@@ -108,14 +245,9 @@ bool isStatusButtonPressed() {
   return !digitalRead(STATUS_BUTTON_PIN);
 }
 
-bool isEastButtonPressed() {
-  return !digitalRead(EAST_BUTTON_PIN);
-}
-bool isWestButtonPressed() {
-  return !digitalRead(WEST_BUTTON_PIN);
-}
 bool isAnyButtonPressed() {
-  return isStatusButtonPressed() || isEastButtonPressed() || isWestButtonPressed();
+  bool displayButtonPressed = updateButtonList(buttons);
+  return isStatusButtonPressed() || displayButtonPressed;
 }
 // END Control button declarations
 
@@ -125,24 +257,26 @@ const int ACTUATOR_POSITION_UNKNOWN = -10000;
 // keep track of the actuator position
 int actuatorPosition = ACTUATOR_POSITION_UNKNOWN;
 // define the pins involved
-const int MOVE_EAST_PIN = 6;
-const int MOVE_WEST_PIN = 5;
-const int ACTUATOR_COUNTER_PIN = 13;
+const int MOTOR_SIGNALPOWER_PIN = 22;
+const int MOTOR_IN1_PIN = 26;
+const int MOTOR_IN2_PIN = 28;
+const int MOTOR_ENA1_PIN = 24;
+const int MOTOR_GROUND_PIN = 30;
+const int ACTUATOR_COUNTER_PIN = 32;
 void moveEast() {
-  // make sure west movement pin is off
-  digitalWrite(MOVE_WEST_PIN, LOW);
-  // enable east movement pin
-  digitalWrite(MOVE_EAST_PIN, HIGH);
+  // IN1 high, IN2 low
+  digitalWrite(MOTOR_IN1_PIN, HIGH);
+  digitalWrite(MOTOR_IN2_PIN, LOW);
 }
 void moveWest() {
-  // make sure east movement pin is off
-  digitalWrite(MOVE_EAST_PIN, LOW);
-  // enable west movement pin
-  digitalWrite(MOVE_WEST_PIN, HIGH);
+  // IN1 low, IN2 high
+  digitalWrite(MOTOR_IN1_PIN, LOW);
+  digitalWrite(MOTOR_IN2_PIN, HIGH);
 }
 void stopMoving() {
-  digitalWrite(MOVE_EAST_PIN, LOW);
-  digitalWrite(MOVE_WEST_PIN, LOW);
+  // both high is float (both low is brake, which we don't need to waste power on)
+  digitalWrite(MOTOR_IN1_PIN, HIGH);
+  digitalWrite(MOTOR_IN2_PIN, HIGH);
 }
 void disableTracking() {
   // to set the right status we need to know if we have a known actuator position or not
@@ -278,7 +412,7 @@ void onRTCAlarmISR() {
 // DO NOT CALL this when motor is moving.  It can take a long time if screen is off so you'll miss motor ticks
 void showTimePosMessage(const char* message) {
   // block this if motor is on
-  if (digitalRead(MOVE_EAST_PIN) || digitalRead(MOVE_WEST_PIN)){
+  if (digitalRead(MOTOR_IN1_PIN) == 0 || digitalRead(MOTOR_IN2_PIN) == 0){
     Serial.println(F("BAD PROGRAMMER: showTimePosMessage called while motor is engaged, ignoring"));
     return;
   }
@@ -286,24 +420,22 @@ void showTimePosMessage(const char* message) {
   turnOnClearDisplay();
   // if there's a fatal error (like RTC lost power), only display an error message
   if (isFatalError()){
-    mySerial.print(F("FATAL ERROR!"));
-    mySerial.print(GOTO_LINE_TWO);
-    mySerial.print(systemStatusStrings[currentSystemStatus]);
+    snprintf(line1Buffer, SCREEN_SIZE, "FATAL ERROR!");
+    snprintf(line2Buffer, SCREEN_SIZE, systemStatusStrings[currentSystemStatus]);
   } else {
     // load current time, position, and tracking status to line 1
     DateTime now = rtc.now();
     // is there a conditional with formatting?  Without that need IF statement to print UNK for actuator position
     if (actuatorPosition != ACTUATOR_POSITION_UNKNOWN){
-      snprintf(line1Buffer, SCREEN_SIZE, "%02d:%02d P %03d T:%s", now.hour(), now.minute(), actuatorPosition, isTracking() ? "Y" : "N");
+      snprintf(line1Buffer, SCREEN_SIZE, "%02d:%02d Pos %04d Track: %s", now.hour(), now.minute(), actuatorPosition, isTracking() ? "Y" : "N");
     } else {
-      snprintf(line1Buffer, SCREEN_SIZE, "%02d:%02d P UNK T:%s", now.hour(), now.minute(), isTracking() ? "Y" : "N");
+      snprintf(line1Buffer, SCREEN_SIZE, "%02d:%02d Pos UNKNOWN Track: %s", now.hour(), now.minute(), isTracking() ? "Y" : "N");
     }
-    mySerial.print(line1Buffer);
     // copy message to line2Buffer and print
     snprintf(line2Buffer, SCREEN_SIZE, "%s", message);
-    mySerial.print(GOTO_LINE_TWO);
-    mySerial.print(line2Buffer);
   }
+  // in either case, update the print area
+  updateTextArea();
 }
 
 // this is called at the end of the main loop()
@@ -311,15 +443,15 @@ void sleepAtLoopEnd() {
   // sleeping too fast after sending output to the serial port will result in partially transmitted data
   // so flush it and wait 10 ms before sleeping
   Serial.flush();
-  mySerial.flush();
   delay(10); // TODO: this is likely not necessary, remove with testing
   // turn off the builtin LED when we're asleep
   digitalWrite(LED_BUILTIN, LOW);
   // turn off display
   turnOffDisplay();
   // set sleep mode to minimum power
-  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  sleep_enable();  // enables the sleep bit in the mcucr register
+  // TODO: fix this power down
+  //set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  //sleep_enable();  // enables the sleep bit in the mcucr register
   // enable our interrupts that are disabled while we're awake
   attachInterrupt(digitalPinToInterrupt(STATUS_BUTTON_PIN), onStatusButtonISR, FALLING);
   // clock interrupts are only used if a fatal error has not occurred (normal state of affairs)
@@ -333,11 +465,16 @@ void sleepAtLoopEnd() {
   // set the wake reason to UNKNOWN so if something wakes us up without setting a reason, it will be unknown
   currentWakeReason = UNKNOWN;
   // here the device is actually put to sleep
-  sleep_mode();
+  //sleep_mode();
+  // TODO: remove this while loop once sleep is implemented properly
+  while(!rtc.alarmFired(1) && currentWakeReason == UNKNOWN){
+    //Serial.println("doing fake delay sleep, get rid of this");
+    delay(200);
+  }
   // disable these interrupts during loop processing
   detachInterrupt(digitalPinToInterrupt(STATUS_BUTTON_PIN));
   detachInterrupt(digitalPinToInterrupt(CLOCK_INTERRUPT_PIN));
-  sleep_disable();
+  //sleep_disable();
   // turn on the builtin LED when we're awake
   digitalWrite(LED_BUILTIN, HIGH);
 }
@@ -461,7 +598,8 @@ void awaitSetupButtons() {
   // watch for button presses if the user has interracted with the device in the last 15 seconds
   while (millis() - lastInteraction < 15000) {
     // check for buttons being pressed
-    if (isEastButtonPressed() || isWestButtonPressed()) {
+    updateButtonList(buttons);
+    if (east_btn.isPressed() || west_btn.isPressed()) {
       delay(30); // these buttons are not hardware debounced, so delay before further checks if they're pressed or not
       // update tracking mode since user has manually moved
       // if status is TRACKING then set to TRACKING_DISABLED, otherwise leave it as it is
@@ -469,22 +607,33 @@ void awaitSetupButtons() {
         disableTracking();
       }
       // what's our desired move direction? 
-      MoveDirection moveDirection = isWestButtonPressed() ? WEST : EAST;
+      MoveDirection moveDirection = west_btn.isPressed() ? WEST : EAST;
       const char* moveString = moveDirection == WEST ? "Manual move west" : "Manual move east";
       Serial.println(moveString);
       showTimePosMessage(moveString);
-      // move east or west until corresponding button is released, abort if user simultaneously presses status button (wants to abort to switch to auto move)
-      bool abortedWithStatusButton = moveUntilConditionOrAbort(moveDirection, [=](){
-        return (moveDirection == WEST && !isWestButtonPressed()) || (moveDirection == EAST && !isEastButtonPressed());
-      }, isStatusButtonPressed);
-      // did they abort by pushing status button?
-      if (abortedWithStatusButton){
-        // yes, aborted by pushing status button because they want auto move
+      // move east or west until corresponding button is released
+      moveUntilConditionOrAbort(moveDirection, [=](){
+        updateButtonList(buttons);
+        return (moveDirection == WEST && !west_btn.isPressed()) || (moveDirection == EAST && !east_btn.isPressed());
+      }, [=](){
+        // no abort, just wait until they release the button
+        return false;
+      });
+      showTimePosMessage("stopped moving");
+      // in some cases the user might still be holding a button down, wait for all buttons to be released
+      while(isAnyButtonPressed());
+      // keep track of last interaction time
+      lastInteraction = millis();
+    } else if (east_auto_btn.isPressed() || west_auto_btn.isPressed()) {
+      // they want to auto move
         // auto move is only allowed if actuator position is known
         if (actuatorPosition != ACTUATOR_POSITION_UNKNOWN){
           // auto move is ok
+        MoveDirection moveDirection = west_auto_btn.isPressed() ? WEST : EAST;
+        const char* moveString = moveDirection == WEST ? "Auto move west" : "Auto move east";
+        Serial.println(moveString);
           // notify user of auto move
-          showTimePosMessage("Auto move ON");
+        showTimePosMessage(moveString);
           // wait for them to release the buttons
           while(isAnyButtonPressed());
           // auto move in the same direction until we reach the end position, or user presses any button to abort
@@ -493,19 +642,16 @@ void awaitSetupButtons() {
                     (moveDirection == EAST && actuatorPosition <= 0);
           }, isAnyButtonPressed);
           // we don't really care if they aborted or not, either way we've stopped moving and no need to do more
+        showTimePosMessage("stopped moving");
+        // in some cases the user might still be holding a button down (cancelling auto move), wait for all buttons to be released
+        while(isAnyButtonPressed());
         } else {
           // auto move is not ok because actuator position is unknown
-          showTimePosMessage("Can't auto move");
-          // make sure they can see this
-          delay(3000);
-        }
-      }
-      // however we got to this point, we should just tell the user that we've stopped moving
-      // and if there was an error then this will tell them that
-      showTimePosMessage("stopped moving");
+        showTimePosMessage("Can't auto move- position unknown");
       // in some cases the user might still be holding a button down (cancelling auto move), wait for all buttons to be released
       while(isAnyButtonPressed());
-      // update lastInteraction time so the loop waits
+      }
+      // keep track of last interaction time
       lastInteraction = millis();
     } else if (isStatusButtonPressed()){
       // if we're already tracking, then this aborts
@@ -602,24 +748,26 @@ void setup() {
   digitalWrite(LED_BUILTIN, HIGH);
 
   // START actuator setup
-  digitalWrite(MOVE_EAST_PIN, LOW);
-  pinMode(MOVE_EAST_PIN, OUTPUT);
-  digitalWrite(MOVE_WEST_PIN, LOW);
-  pinMode(MOVE_WEST_PIN, OUTPUT);
+  digitalWrite(MOTOR_ENA1_PIN, HIGH);
+  pinMode(MOTOR_ENA1_PIN, OUTPUT);
+  digitalWrite(MOTOR_IN1_PIN, HIGH);
+  pinMode(MOTOR_IN1_PIN, OUTPUT);
+  digitalWrite(MOTOR_IN2_PIN, HIGH);
+  pinMode(MOTOR_IN2_PIN, OUTPUT);
+  digitalWrite(MOTOR_GROUND_PIN, LOW);
+  pinMode(MOTOR_GROUND_PIN, OUTPUT);
+  digitalWrite(MOTOR_SIGNALPOWER_PIN, HIGH);
+  pinMode(MOTOR_SIGNALPOWER_PIN, OUTPUT);
   pinMode(ACTUATOR_COUNTER_PIN, INPUT_PULLUP);
   // END actuator setup
 
   // START external display setup
-  digitalWrite(SERIAL_POWER_PIN, HIGH);
-  pinMode(SERIAL_POWER_PIN, OUTPUT);
-  digitalWrite(TX_PIN, LOW);  // Stop bit state for inverted serial
-  pinMode(TX_PIN, OUTPUT);
-  mySerial.begin(9600);  // Set the data rate
+  digitalWrite(DISPLAY_POWER_PIN, HIGH);
+  pinMode(DISPLAY_POWER_PIN, OUTPUT);
   turnOnClearDisplay();
   snprintf(line1Buffer, SCREEN_SIZE, "%s", "Initializing");
-  mySerial.print(line1Buffer);
-  mySerial.print(GOTO_LINE_TWO);
-  mySerial.print(F("line two available"));
+  snprintf(line2Buffer, SCREEN_SIZE, "line two available");
+  updateTextArea();
   Serial.println(F("connected to external display"));
   // END external display setup
 
@@ -695,8 +843,6 @@ void setup() {
 
   // START Control button setup
   pinMode(STATUS_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(EAST_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(WEST_BUTTON_PIN, INPUT_PULLUP);
   // END Control button setup
 }
 

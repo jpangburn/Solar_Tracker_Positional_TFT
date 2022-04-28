@@ -1,4 +1,4 @@
-# Solar_Tracker_Positional
+# Solar_Tracker_Positional_TFT
 
 This is an Arduino program which uses a linear actuator with a reed switch to make a single axis solar tracker move with no visual reference to the sun.  It uses the [Solar Position library](https://github.com/KenWillmott/SolarPosition) by Ken Willmott to determine the sun's current azimuth, given the GPS coordinate location of the tracker and the current time.
 
