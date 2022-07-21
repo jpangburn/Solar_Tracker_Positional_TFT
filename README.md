@@ -40,7 +40,7 @@ If a code change becomes necessary, follow these steps:
 1. Download this repository
 2. Edit code in Arduino IDE and compile to make sure the code is ok
 3. Move tracker to east limit
-4. Plug USB into laptop, select port and board (MEGA 2560 currently), and click upload
+4. Plug USB into laptop, select port and board (Arduino Due currently), and click upload
 5. Disconnect USB
 6. Follow setup instructions in the [User notes](https://jpangburn.github.io/solartrackertft/) under the "Setup After Reset" section
 7. Upload modified code to GitHub so it's not lost
