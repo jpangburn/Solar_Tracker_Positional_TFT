@@ -398,6 +398,8 @@ float calculatePositionFromAzimuth(float azimuth){
 RTC_DS3231 rtc;
 // the pin that is connected to RTC's SQW
 const int CLOCK_INTERRUPT_PIN = 19;
+// there's not a free 3.3v power pin to power the clock, so we use a digital pin to power it (5V power to clock causes spurious errors because Due expects 3.3)
+const int CLOCK_POWER_PIN = 23;
 // RTC alarm counter (volatile because it's modified by an ISR)
 volatile byte alarmCounter = 0;
 // interrupt service routine that fires when the clock sends us a tick
@@ -772,6 +774,10 @@ void setup() {
   // END external display setup
 
   // START RTC setup
+  // turn power on to the clock, give it a couple seconds to startup though probably doesn't need it because of the battery
+  digitalWrite(CLOCK_POWER_PIN, HIGH);
+  pinMode(CLOCK_POWER_PIN, OUTPUT);
+  delay(2000);
   // initialize communication with the rtc
   if (!rtc.begin()) {
     Serial.println(F("Couldn't find RTC!"));
