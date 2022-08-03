@@ -5,6 +5,8 @@
 
 //TODO: sleep doesn't work on the Due, maybe need to replace with another MEGA 2560
 //#include <avr/sleep.h>
+#include <Wire.h>
+extern TwoWire Wire1;
 #include <RTClib.h>
 #include <math.h>
 #include <SolarPosition.h>
@@ -153,7 +155,6 @@ bool screenAlreadyOn = 0;
 // these buffers hold data to go to the screen
 char line1Buffer[SCREEN_SIZE];
 char line2Buffer[SCREEN_SIZE];
-char timeBuffer[] = "hh:mm:ss";
 
 void updateTextArea(){
   tft.fillRect(0,0,320,70, WHITE);
@@ -470,7 +471,8 @@ void sleepAtLoopEnd() {
   //sleep_mode();
   // TODO: remove this while loop once sleep is implemented properly
   while(!rtc.alarmFired(1) && currentWakeReason == UNKNOWN){
-    //Serial.println("doing fake delay sleep, get rid of this");
+    //Serial.print("doing fake delay sleep, get rid of this: ");
+    //Serial.println(alarmCounter);
     delay(200);
   }
   // disable these interrupts during loop processing
@@ -779,7 +781,7 @@ void setup() {
   pinMode(CLOCK_POWER_PIN, OUTPUT);
   delay(2000);
   // initialize communication with the rtc
-  if (!rtc.begin()) {
+  if (!rtc.begin(&Wire1)) {
     Serial.println(F("Couldn't find RTC!"));
     Serial.flush();
     abort();
@@ -807,8 +809,9 @@ void setup() {
     DateTime utcDateTime = DateTime(utcSeconds);
     // set the RTC with utcDateTime
     rtc.adjust(utcDateTime);
-    */    
+    */
   }
+  
 
   //we don't need the RTC's 32K Pin, so disable it
   rtc.disable32K();
@@ -853,6 +856,8 @@ void setup() {
 }
 
 void loop() {
+  DateTime now;
+  char timeBuffer[] = "hh:mm:ss";
   Serial.print(F("Wakeup for reason: "));
   Serial.println(wakeReasonStrings[currentWakeReason]);
   // if there's a fatal error, then the only interrupt will be the status button
@@ -876,12 +881,14 @@ void loop() {
 
     case RTC_ALARM:
       // print current time
-      rtc.now().toString(timeBuffer);
-      Serial.println(timeBuffer);// resetting SQW and alarm 1 flag
-      // clear the alarm 1 flag
+      now = rtc.now();
+      sprintf(timeBuffer, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+      Serial.println(timeBuffer);
+      // resetting SQW and alarm 1 flag
       if (rtc.alarmFired(1)) {
         rtc.clearAlarm(1);
-        Serial.println(F("Alarm1 cleared"));
+        Serial.print(F("Alarm1 cleared, counter is: "));
+        Serial.println(alarmCounter);
       }
       // how many times we've alarmed, if it's 10 then it's been 10 minutes and we should move
       if (alarmCounter >= 10) {
