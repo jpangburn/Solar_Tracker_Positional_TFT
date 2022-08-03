@@ -5,8 +5,6 @@
 
 //TODO: sleep doesn't work on the Due, maybe need to replace with another MEGA 2560
 //#include <avr/sleep.h>
-#include <Wire.h>
-extern TwoWire Wire1;
 #include <RTClib.h>
 #include <math.h>
 #include <SolarPosition.h>
@@ -781,7 +779,7 @@ void setup() {
   pinMode(CLOCK_POWER_PIN, OUTPUT);
   delay(2000);
   // initialize communication with the rtc
-  if (!rtc.begin(&Wire1)) {
+  if (!rtc.begin()) {
     Serial.println(F("Couldn't find RTC!"));
     Serial.flush();
     abort();
@@ -811,7 +809,6 @@ void setup() {
     rtc.adjust(utcDateTime);
     */
   }
-  
 
   //we don't need the RTC's 32K Pin, so disable it
   rtc.disable32K();
