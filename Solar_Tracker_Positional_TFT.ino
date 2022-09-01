@@ -3,8 +3,7 @@
  * 
  */
 
-//TODO: sleep doesn't work on the Due, maybe need to replace with another MEGA 2560
-//#include <avr/sleep.h>
+#include <avr/sleep.h>
 #include <RTClib.h>
 #include <math.h>
 #include <SolarPosition.h>
@@ -397,8 +396,6 @@ float calculatePositionFromAzimuth(float azimuth){
 RTC_DS3231 rtc;
 // the pin that is connected to RTC's SQW
 const int CLOCK_INTERRUPT_PIN = 19;
-// there's not a free 3.3v power pin to power the clock, so we use a digital pin to power it (5V power to clock causes spurious errors because Due expects 3.3)
-const int CLOCK_POWER_PIN = 23;
 // RTC alarm counter (volatile because it's modified by an ISR)
 volatile byte alarmCounter = 0;
 // interrupt service routine that fires when the clock sends us a tick
@@ -450,9 +447,8 @@ void sleepAtLoopEnd() {
   // turn off display
   turnOffDisplay();
   // set sleep mode to minimum power
-  // TODO: fix this power down
-  //set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  //sleep_enable();  // enables the sleep bit in the mcucr register
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  sleep_enable();  // enables the sleep bit in the mcucr register
   // enable our interrupts that are disabled while we're awake
   attachInterrupt(digitalPinToInterrupt(STATUS_BUTTON_PIN), onStatusButtonISR, FALLING);
   // clock interrupts are only used if a fatal error has not occurred (normal state of affairs)
@@ -466,17 +462,11 @@ void sleepAtLoopEnd() {
   // set the wake reason to UNKNOWN so if something wakes us up without setting a reason, it will be unknown
   currentWakeReason = UNKNOWN;
   // here the device is actually put to sleep
-  //sleep_mode();
-  // TODO: remove this while loop once sleep is implemented properly
-  while(!rtc.alarmFired(1) && currentWakeReason == UNKNOWN){
-    //Serial.print("doing fake delay sleep, get rid of this: ");
-    //Serial.println(alarmCounter);
-    delay(200);
-  }
+  sleep_mode();
   // disable these interrupts during loop processing
   detachInterrupt(digitalPinToInterrupt(STATUS_BUTTON_PIN));
   detachInterrupt(digitalPinToInterrupt(CLOCK_INTERRUPT_PIN));
-  //sleep_disable();
+  sleep_disable();
   // turn on the builtin LED when we're awake
   digitalWrite(LED_BUILTIN, HIGH);
 }
@@ -774,10 +764,6 @@ void setup() {
   // END external display setup
 
   // START RTC setup
-  // turn power on to the clock, give it a couple seconds to startup though probably doesn't need it because of the battery
-  digitalWrite(CLOCK_POWER_PIN, HIGH);
-  pinMode(CLOCK_POWER_PIN, OUTPUT);
-  delay(2000);
   // initialize communication with the rtc
   if (!rtc.begin()) {
     Serial.println(F("Couldn't find RTC!"));
