@@ -8,7 +8,7 @@ const unsigned int MINIMUM_ACTUATOR_MOVEMENT = 10;
 const float LATITUDE = 33.11;
 const float LONGITUDE = -116.98;
 // polynomial regression constants for converting desired azimuth to actuator position
-float X3 = 0.0003685;
-float X2 = -0.2881681;
-float X1 = 81.6435101;
-float X0 = -7322;
+float X3 = -0.0000129;
+float X2 = -0.0359544;
+float X1 = 28.0307246;
+float X0 = -3488.7;
